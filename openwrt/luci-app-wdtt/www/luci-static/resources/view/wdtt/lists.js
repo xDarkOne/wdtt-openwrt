@@ -41,13 +41,15 @@ var ALLOWED_WITH_RUSSIA_INSIDE = [
 	'digitalocean', 'cloudfront'
 ];
 
-// Mirror podkop: only one regional list, and russia_inside excludes the
-// services it already contains.
+// Mirror podkop (section.js) exactly: only one regional list, and russia_inside
+// excludes the services it already contains. Podkop derives the kept regional
+// by REGIONAL_OPTIONS order (filter the constant by what's selected, keep the
+// last), so replicate that ordering — not the user's selection order.
 function enforceExclusions(values) {
 	var vals = Array.isArray(values) ? values.slice() : (values ? [ values ] : []);
-	var regionals = vals.filter(function (v) { return REGIONAL_OPTIONS.indexOf(v) >= 0; });
+	var regionals = REGIONAL_OPTIONS.filter(function (v) { return vals.indexOf(v) >= 0; });
 	if (regionals.length > 1) {
-		var keep = regionals[regionals.length - 1]; // last selected wins
+		var keep = regionals[regionals.length - 1];
 		vals = vals.filter(function (v) { return REGIONAL_OPTIONS.indexOf(v) < 0 || v === keep; });
 	}
 	if (vals.indexOf('russia_inside') >= 0) {
