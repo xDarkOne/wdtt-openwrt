@@ -1,0 +1,28 @@
+{
+	"admin/services/wdtt": {
+		"title": "WDTT (обход через VK)",
+		"order": 60,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-wdtt" ] }
+	},
+	"admin/services/wdtt/overview": {
+		"title": "Обзор",
+		"order": 1,
+		"action": { "type": "view", "path": "wdtt/overview" }
+	},
+	"admin/services/wdtt/settings": {
+		"title": "Настройки",
+		"order": 2,
+		"action": { "type": "view", "path": "wdtt/settings" }
+	},
+	"admin/services/wdtt/lists": {
+		"title": "Списки обхода",
+		"order": 3,
+		"action": { "type": "view", "path": "wdtt/lists" }
+	},
+	"admin/services/wdtt/diagnostic": {
+		"title": "Диагностика",
+		"order": 4,
+		"action": { "type": "view", "path": "wdtt/diagnostic" }
+	}
+}

@@ -1,0 +1,14 @@
+# Local secrets — NEVER commit these. Secrets are passed at install time only.
+deploy.env
+secrets.env
+*.local.env
+cookies.json
+
+# Editor / OS noise
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+
+# Note: dist/*-linux-* prebuilt binaries ARE committed on purpose so the
+# one-line installer works without a build step.

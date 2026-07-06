@@ -1,0 +1,17 @@
+{
+	"luci-app-wdtt": {
+		"description": "Access to the WDTT VK-call bypass service",
+		"read": {
+			"uci": [ "wdtt" ],
+			"ubus": {
+				"wdtt": [ "status", "check", "diag", "logs" ]
+			}
+		},
+		"write": {
+			"uci": [ "wdtt" ],
+			"ubus": {
+				"wdtt": [ "action" ]
+			}
+		}
+	}
+}

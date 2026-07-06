@@ -1,0 +1,6 @@
+# Shell scripts must stay LF or busybox on the router chokes on \r.
+* text=auto eol=lf
+
+# Prebuilt binaries and archives are binary.
+dist/** binary
+*.tar.gz binary

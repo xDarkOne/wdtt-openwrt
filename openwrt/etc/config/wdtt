@@ -1,0 +1,104 @@
+config wdtt 'settings'
+	# Master switch. install.sh flips this to 1 once configured.
+	option enabled '0'
+
+	# WDTT server DTLS endpoint (host:port). Set at install time via WDTT_SERVER
+	# / WDTT_PEER — this placeholder is never used once installed.
+	option peer 'YOUR_SERVER:56000'
+
+	# Owner password (matches wdtt-server -password). Keep this file 0600.
+	option password 'CHANGEME'
+
+	# Stable unique id for this router. install.sh fills it from the LAN MAC
+	# if left empty; the server allocates a WG IP per device_id.
+	option device_id ''
+
+	# Where to pull fresh VK call links (wdtt-linkd endpoint on the server).
+	# Set at install time. Format (add &slot=N to keep routers non-overlapping):
+	#   http://YOUR_SERVER:56090/YOUR_TOKEN/links?n=4&slot=0
+	option hashes_url ''
+	# Alternatively read tokens from a local file (leave hashes_url empty):
+	# option hashes_file '/etc/wdtt/vk-calls.txt'
+
+	# Max call tokens to use at once (Android uses 4 for higher throughput).
+	option max_hashes '4'
+
+	# Local UDP the kernel WG peer points at; the Go client listens here.
+	option listen '127.0.0.1:9000'
+
+	# TURN workers. The engine uses 9 workers per call-hash, so to actually use
+	# all `max_hashes` calls in parallel set workers = max_hashes * 9.
+	# 36 = 4 hashes x 9 (measured ~4-5x faster than the 9/1-hash default).
+	option workers '36'
+
+	# WireGuard MTU. 1280 is a safe default under the TURN/DTLS/RTP overhead.
+	option mtu '1280'
+
+	# Optional TURN host/port overrides (normally leave empty).
+	option turn_host ''
+	option turn_port ''
+
+	# Routing mode:
+	#   selective = tunnel only blocked domains (NetShift-style, default)
+	#   lan-all   = tunnel all LAN client traffic
+	#   full      = tunnel the whole router
+	option mode 'selective'
+
+	# LAN bridge whose forwarded traffic is tunneled (lan-all mode only).
+	option lan_iface 'br-lan'
+
+	# Policy routing table id and ip-rule preference.
+	option table '100'
+	option rule_pref '30000'
+
+	# How often to refetch tokens and recycle the session.
+	option refresh '15m'
+
+	# --- Auto-failover with NetShift ---
+	# 1 = stay dormant while NetShift's uplink works, auto-activate when it dies.
+	option failover '0'
+	# NetShift's kernel WireGuard uplink interface to watch.
+	option netshift_iface 'AWG'
+	# Handshake age after which NetShift is considered down.
+	option netshift_stale '180s'
+	option failover_interval '20s'
+	# ip rule pref used when failed over (must be below NetShift's ~105).
+	option failover_pref '100'
+
+	# --- Bypass lists (used by luci-app-wdtt / reload_lists) ---
+	# Services to route through the tunnel, from itdoginfo/allow-domains.
+	# Empty by default — pick services in the UI (Lists tab) so nothing is
+	# tunneled until you choose. Ids: russia-inside, russia-outside, ukraine,
+	# telegram, meta, youtube, discord, tiktok, twitter, hdrezka, roblox,
+	# cloudflare, cloudfront, google_ai, google_meet, google_play, hetzner,
+	# ovh, digitalocean, anime, news, geoblock, block, porn, hodca.
+	# list community_list 'telegram'
+	# Fold in /opt/zapret/ipset/zapret-hosts-user.txt.
+	option use_zapret '1'
+	# Auto-refresh the lists from GitHub daily via cron (podkop-style).
+	option auto_update '1'
+	option auto_update_hour '5'
+	# If GitHub is blocked directly, pull lists through the tunnel:
+	#   auto = try direct, fall back to tunnel; always = tunnel only; never = direct only
+	option lists_via_tunnel 'auto'
+
+	# Block LAN clients from using external DoH/DoT so they resolve via the
+	# router (otherwise selective routing leaks — the router never sees the
+	# lookup). Uses the dibdot DoH-IP-blocklists, refreshed with the lists.
+	option block_doh '0'
+	# Prevent IPv6 leaks: drop IPv6 to bypass domains so clients fall back to
+	# IPv4 (which the tunnel carries). Non-bypass IPv6 is untouched.
+	option block_ipv6 '0'
+	# Free-form domains (multiline; // comments allowed):
+	# option custom_domains 'example.com\n// note\nfoo.org'
+	# Local files with domain lists (repeatable):
+	# list local_domain_list '/opt/zapret/ipset/my.txt'
+	# Remote URLs with domain lists (repeatable):
+	# list remote_domain_list 'https://example.com/domains.txt'
+	# Destination subnets/IPs routed through the tunnel (free-form):
+	# option custom_subnets '149.154.160.0/20'
+	# Local / remote subnet list files/URLs (repeatable):
+	# list local_subnet_list '/etc/wdtt/subnets.txt'
+	# list remote_subnet_list 'https://example.com/subnets.txt'
+	# LAN IPs/subnets whose whole traffic always goes through the tunnel:
+	# list fully_routed_ip '192.168.1.50'

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Register luci-app-wdtt: clear LuCI cache and reload rpcd so the new ubus
+# object + ACL take effect.
+rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null
+/etc/init.d/rpcd reload 2>/dev/null
+exit 0

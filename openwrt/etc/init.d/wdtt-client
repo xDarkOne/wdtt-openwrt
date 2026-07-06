@@ -1,0 +1,108 @@
+#!/bin/sh /etc/rc.common
+# procd service for the headless WDTT (WireGuard-over-TURN) client.
+
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/sbin/wdtt-client
+CRON_FILE=/etc/crontabs/root
+
+# Keep the auto-update cron entry in sync with the config.
+sync_cron() {
+	local au hour
+	config_get_bool au settings auto_update 0
+	config_get hour settings auto_update_hour 5
+	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-genlists#d' "$CRON_FILE"
+	if [ "$au" = "1" ]; then
+		mkdir -p /etc/crontabs
+		echo "0 $hour * * * /usr/sbin/wdtt-genlists >/dev/null 2>&1 # wdtt" >> "$CRON_FILE"
+		/etc/init.d/cron enable 2>/dev/null
+		# crond watches /etc/crontabs via inotify; only start it if it's down
+		# (avoid restart churn that can leave procd/crond out of sync).
+		pgrep crond >/dev/null 2>&1 || /etc/init.d/cron start 2>/dev/null
+	fi
+}
+
+stop_service() {
+	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-genlists#d' "$CRON_FILE"
+}
+
+start_service() {
+	config_load wdtt
+
+	local enabled peer password device_id hashes_url hashes_file max_hashes
+	local listen workers mtu turn_host turn_port
+	local mode lan_iface table rule_pref refresh
+	local failover netshift_iface netshift_stale failover_interval failover_pref
+
+	config_get_bool enabled settings enabled 0
+	if [ "$enabled" != "1" ]; then
+		echo "wdtt: disabled in /etc/config/wdtt (set option enabled '1')"
+		return 1
+	fi
+
+	config_get peer        settings peer
+	config_get password    settings password
+	config_get device_id   settings device_id
+	config_get hashes_url  settings hashes_url
+	config_get hashes_file settings hashes_file
+	config_get max_hashes  settings max_hashes 4
+	config_get listen      settings listen '127.0.0.1:9000'
+	config_get workers     settings workers 9
+	config_get mtu         settings mtu 1280
+	config_get turn_host   settings turn_host
+	config_get turn_port   settings turn_port
+	config_get mode        settings mode 'selective'
+	config_get lan_iface   settings lan_iface 'br-lan'
+	config_get table       settings table 100
+	config_get rule_pref   settings rule_pref 30000
+	config_get refresh     settings refresh '15m'
+	config_get_bool failover settings failover 0
+	config_get netshift_iface    settings netshift_iface 'AWG'
+	config_get netshift_stale     settings netshift_stale '180s'
+	config_get failover_interval  settings failover_interval '20s'
+	config_get failover_pref      settings failover_pref 100
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-peer "$peer" \
+		-device-id "$device_id" \
+		-mode "$mode" \
+		-listen "$listen" \
+		-workers "$workers" \
+		-mtu "$mtu" \
+		-max-hashes "$max_hashes" \
+		-lan-iface "$lan_iface" \
+		-table "$table" \
+		-rule-pref "$rule_pref" \
+		-refresh "$refresh"
+
+	[ -n "$hashes_url" ]  && procd_append_param command -hashes-url "$hashes_url"
+	[ -n "$hashes_file" ] && procd_append_param command -hashes-file "$hashes_file"
+	[ -n "$turn_host" ]   && procd_append_param command -turn-host "$turn_host"
+	[ -n "$turn_port" ]   && procd_append_param command -turn-port "$turn_port"
+
+	if [ "$failover" = "1" ]; then
+		procd_append_param command -failover \
+			-netshift-iface "$netshift_iface" \
+			-netshift-stale "$netshift_stale" \
+			-failover-interval "$failover_interval" \
+			-failover-pref "$failover_pref"
+	fi
+
+	# Pass the password via env so it does not show up in `ps`.
+	procd_set_param env WDTT_PASSWORD="$password"
+
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+
+	# Auto-update lists via cron (podkop-style).
+	sync_cron
+}
+
+service_triggers() {
+	procd_add_reload_trigger "wdtt"
+}

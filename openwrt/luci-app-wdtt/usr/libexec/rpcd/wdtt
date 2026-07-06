@@ -1,0 +1,140 @@
+#!/bin/sh
+# rpcd backend for luci-app-wdtt. Exposes status/check/action/diag/logs to the
+# LuCI JS frontend over ubus. List assembly is delegated to wdtt-genlists.
+. /usr/share/libubox/jshn.sh
+
+NFSET=wdtt_dst4
+NFSET6=wdtt_dst6
+DNSMASQ_DST=/etc/dnsmasq.d/wdtt-domains.conf
+
+svc_running() { /etc/init.d/wdtt-client running 2>/dev/null; }
+count4() { nft list set inet fw4 "$1" 2>/dev/null | grep -oc -E '([0-9]{1,3}\.){3}[0-9]{1,3}'; }
+count6() { nft list set inet fw4 "$1" 2>/dev/null | grep -oc -E '[0-9a-fA-F]{0,4}:[0-9a-fA-F:]+'; }
+
+status() {
+	local enabled mode addr hs age running peer rx tx dom failover doh v6
+	enabled=$(uci -q get wdtt.settings.enabled || echo 0)
+	mode=$(uci -q get wdtt.settings.mode || echo selective)
+	peer=$(uci -q get wdtt.settings.peer)
+	failover=$(uci -q get wdtt.settings.failover || echo 0)
+	doh=$(uci -q get wdtt.settings.block_doh || echo 0)
+	v6=$(uci -q get wdtt.settings.block_ipv6 || echo 0)
+	svc_running && running=1 || running=0
+	addr=$(ip -4 -o addr show wgturn 2>/dev/null | awk '{print $4}' | head -1)
+	hs=$(wg show wgturn latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
+	if [ -n "$hs" ] && [ "$hs" != "0" ]; then age=$(( $(date +%s) - hs )); else age=-1; fi
+	rx=$(wg show wgturn transfer 2>/dev/null | awk 'NR==1{print $2}'); rx=${rx:-0}
+	tx=$(wg show wgturn transfer 2>/dev/null | awk 'NR==1{print $3}'); tx=${tx:-0}
+	dom=$(grep -c '4#inet#fw4' "$DNSMASQ_DST" 2>/dev/null || echo 0)
+
+	json_init
+	json_add_boolean enabled "$enabled"
+	json_add_boolean running "$running"
+	json_add_boolean failover "$failover"
+	json_add_string mode "$mode"
+	json_add_string peer "${peer:-}"
+	json_add_string addr "${addr:-}"
+	json_add_int handshake_age "$age"
+	json_add_int bypass_ips "$(count4 $NFSET)"
+	json_add_int bypass_ips6 "$(count6 $NFSET6)"
+	json_add_int bypass_domains "$dom"
+	json_add_double rx_bytes "$rx"
+	json_add_double tx_bytes "$tx"
+	json_add_boolean block_doh "$doh"
+	json_add_boolean block_ipv6 "$v6"
+	json_add_boolean up "$([ -n "$addr" ] && echo 1 || echo 0)"
+	json_dump
+}
+
+# check: prove the data path by fetching an exit-IP through the tunnel.
+check() {
+	local exit_ip="" ok=0
+	if ip link show wgturn >/dev/null 2>&1; then
+		ip route add 1.0.0.1/32 dev wgturn 2>/dev/null
+		exit_ip=$( (uclient-fetch -qO- "http://1.0.0.1/cdn-cgi/trace" 2>/dev/null || wget -qO- "http://1.0.0.1/cdn-cgi/trace" 2>/dev/null) | sed -n 's/^ip=//p')
+		ip route del 1.0.0.1/32 dev wgturn 2>/dev/null
+		[ -n "$exit_ip" ] && ok=1
+	fi
+	json_init
+	json_add_boolean ok "$ok"
+	json_add_string exit_ip "${exit_ip:-}"
+	json_dump
+}
+
+# diag: heavier on-demand health checks for the Diagnostics tab.
+diag() {
+	local peer host preach ping_ms exit_ip exit_ok dns_ok
+	peer=$(uci -q get wdtt.settings.peer)
+	host=${peer%%:*}
+	ping_ms=$(ping -c1 -W2 "$host" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+	[ -n "$ping_ms" ] && preach=1 || preach=0
+	exit_ip=""; exit_ok=0
+	if ip link show wgturn >/dev/null 2>&1; then
+		ip route add 1.0.0.1/32 dev wgturn 2>/dev/null
+		exit_ip=$( (uclient-fetch -qO- "http://1.0.0.1/cdn-cgi/trace" 2>/dev/null || wget -qO- "http://1.0.0.1/cdn-cgi/trace" 2>/dev/null) | sed -n 's/^ip=//p')
+		ip route del 1.0.0.1/32 dev wgturn 2>/dev/null
+		[ -n "$exit_ip" ] && exit_ok=1
+	fi
+	nslookup openwrt.org >/dev/null 2>&1 && dns_ok=1 || dns_ok=0
+
+	json_init
+	json_add_boolean server_reachable "$preach"
+	json_add_string server_ping "${ping_ms:-}"
+	json_add_string server_host "${host:-}"
+	json_add_boolean exit_ok "$exit_ok"
+	json_add_string exit_ip "${exit_ip:-}"
+	json_add_boolean dns_ok "$dns_ok"
+	json_add_int bypass_ips "$(count4 $NFSET)"
+	json_add_int bypass_ips6 "$(count6 $NFSET6)"
+	json_add_int doh_ips "$(count4 wdtt_doh4)"
+	json_dump
+}
+
+logs() {
+	json_init
+	json_add_string log "$(logread 2>/dev/null | grep -E 'wdtt-client|\[core|\[wdtt|\[netcfg' | tail -n 80)"
+	json_dump
+}
+
+action() {
+	local act rc
+	json_load "$(cat)"
+	json_get_var act action
+	case "$act" in
+		start)   uci set wdtt.settings.enabled=1; uci commit wdtt; /etc/init.d/wdtt-client enable; /etc/init.d/wdtt-client start ;;
+		stop)    uci set wdtt.settings.enabled=0; uci commit wdtt; /etc/init.d/wdtt-client stop ;;
+		restart) /etc/init.d/wdtt-client restart ;;
+		reload_lists)
+			/usr/sbin/wdtt-genlists 2>/dev/null; rc=$?
+			if [ "$rc" = 2 ]; then
+				json_init; json_add_boolean ok 0
+				json_add_string error "dnsmasq без nftset: сначала установите dnsmasq-full (полная установка WDTT)"
+				json_dump; return
+			fi
+			json_init; json_add_boolean ok 1; json_dump; return ;;
+		*) json_init; json_add_boolean ok 0; json_add_string error "unknown action"; json_dump; return ;;
+	esac
+	json_init; json_add_boolean ok 1; json_dump
+}
+
+case "$1" in
+	list)
+		json_init
+		json_add_object status; json_close_object
+		json_add_object check;  json_close_object
+		json_add_object diag;   json_close_object
+		json_add_object logs;   json_close_object
+		json_add_object action; json_add_string action "start|stop|restart|reload_lists"; json_close_object
+		json_dump
+		;;
+	call)
+		case "$2" in
+			status) status ;;
+			check)  check ;;
+			diag)   diag ;;
+			logs)   logs ;;
+			action) action ;;
+			*) echo '{"error":"unknown method"}' ;;
+		esac
+		;;
+esac

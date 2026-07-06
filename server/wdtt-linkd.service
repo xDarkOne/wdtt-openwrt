@@ -1,0 +1,20 @@
+[Unit]
+Description=WDTT fresh call-links endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wdtt-linkd.env
+ExecStart=/usr/local/bin/wdtt-linkd -listen ${LINKD_LISTEN} -file ${LINKD_FILE} -token ${LINKD_TOKEN} -n 4
+Restart=always
+RestartSec=5
+# Unprivileged, read-only view of just the links file.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/whitelist-bypass
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
