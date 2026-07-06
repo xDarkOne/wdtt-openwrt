@@ -129,12 +129,11 @@ sh server/setup-linkd.sh
 
 ## Router — install in one line
 
-On each router, replace `YOURUSER` with your GitHub user and fill in your
-server / token / owner-password. **No secrets live in the repo** — they are
-passed here at install time.
+On each router, fill in your server / token / owner-password. **No secrets live
+in the repo** — they are passed here at install time.
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/YOURUSER/wdtt-openwrt/main/bootstrap.sh \
+wget -qO- https://raw.githubusercontent.com/xDarkOne/wdtt-openwrt/main/bootstrap.sh \
   | WDTT_SERVER=your-server WDTT_TOKEN=your-token WDTT_PASSWORD='owner-pass' \
     sh -s -- --slot 0
 ```
@@ -146,7 +145,7 @@ and 25.x (apk)**.
 Prefer not to pipe from the net? Clone and run locally:
 
 ```sh
-git clone https://github.com/YOURUSER/wdtt-openwrt && cd wdtt-openwrt
+git clone https://github.com/xDarkOne/wdtt-openwrt && cd wdtt-openwrt
 cp deploy.env.example deploy.env      # fill in server / token / password
 . ./deploy.env && sh scripts/install.sh --slot 0
 ```

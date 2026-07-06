@@ -2,9 +2,9 @@
 # One-line installer for WDTT-OpenWrt. Downloads the repo tarball and hands off
 # to scripts/install.sh. No git needed on the router; works on OpenWrt 24/25.
 #
-# Usage (replace YOURUSER, fill your server/token/password):
+# Usage (fill your server/token/password):
 #
-#   wget -qO- https://raw.githubusercontent.com/YOURUSER/wdtt-openwrt/main/bootstrap.sh \
+#   wget -qO- https://raw.githubusercontent.com/xDarkOne/wdtt-openwrt/main/bootstrap.sh \
 #     | WDTT_SERVER=your-server WDTT_TOKEN=your-token WDTT_PASSWORD='owner-pass' \
 #       sh -s -- --slot 0
 #
@@ -13,7 +13,7 @@ set -e
 
 # After you fork/create the repo, set this to <your-github-user>/wdtt-openwrt
 # (or pass WDTT_REPO=... in the environment).
-REPO="${WDTT_REPO:-YOURUSER/wdtt-openwrt}"
+REPO="${WDTT_REPO:-xDarkOne/wdtt-openwrt}"
 REF="${WDTT_REF:-main}"
 TMP="/tmp/wdtt-openwrt-src"
 URL="https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF"
