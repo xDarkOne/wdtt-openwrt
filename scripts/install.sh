@@ -69,14 +69,8 @@ derive_secrets() {
 		host="${WDTT_SERVER%%:*}"
 		WDTT_HASHES_URL="http://$host:$lport/$WDTT_TOKEN/links?n=$n"
 	fi
-	# Append the slot so multiple routers never share calls.
-	if [ -n "$WDTT_SLOT" ] && [ -n "$WDTT_HASHES_URL" ]; then
-		case "$WDTT_HASHES_URL" in
-			*slot=*) : ;;
-			*\?*) WDTT_HASHES_URL="$WDTT_HASHES_URL&slot=$WDTT_SLOT" ;;
-			*)    WDTT_HASHES_URL="$WDTT_HASHES_URL?slot=$WDTT_SLOT" ;;
-		esac
-	fi
+	# The slot is stored separately (uci call_slot) and applied by the init
+	# script, so it can also be changed later in the LuCI UI.
 }
 
 detect_asset() {
@@ -166,6 +160,7 @@ install_config() {
 	[ -n "$WDTT_PASSWORD" ]   && uci set wdtt.settings.password="$WDTT_PASSWORD"
 	[ -n "$WDTT_HASHES_URL" ] && uci set wdtt.settings.hashes_url="$WDTT_HASHES_URL"
 	[ -n "$WDTT_MODE" ]       && uci set wdtt.settings.mode="$WDTT_MODE"
+	[ -n "$WDTT_SLOT" ]       && uci set wdtt.settings.call_slot="$WDTT_SLOT"
 	uci commit wdtt
 	chmod 0600 "$CFG_DST"
 	[ -n "$WDTT_SLOT" ] && echo "-> slot=$WDTT_SLOT"

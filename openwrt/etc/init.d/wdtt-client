@@ -34,10 +34,19 @@ stop_service() {
 	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-\(genlists\|resolve\)#d' "$CRON_FILE"
 }
 
+# Config changed (Save & Apply in LuCI): rebuild the bypass lists, and re-eval
+# the daemon (procd restarts the instance only if its command actually changed,
+# so a list-only change never drops the tunnel). genlists runs detached so the
+# apply returns immediately.
+reload_service() {
+	start_service
+	( /usr/sbin/wdtt-genlists >/dev/null 2>&1 & )
+}
+
 start_service() {
 	config_load wdtt
 
-	local enabled peer password device_id hashes_url hashes_file max_hashes
+	local enabled peer password device_id hashes_url hashes_file max_hashes call_slot
 	local listen workers mtu turn_host turn_port
 	local mode lan_iface table rule_pref refresh
 	local failover netshift_iface netshift_stale failover_interval failover_pref
@@ -53,7 +62,19 @@ start_service() {
 	config_get device_id   settings device_id
 	config_get hashes_url  settings hashes_url
 	config_get hashes_file settings hashes_file
+	config_get call_slot   settings call_slot
 	config_get max_hashes  settings max_hashes 4
+
+	# Pick the VK-call slot (which non-overlapping subset this router draws) from
+	# the UI. If set, it overrides any slot baked into hashes_url; if empty, the
+	# URL is left as-is (backward compatible with installs that put slot in it).
+	if [ -n "$call_slot" ] && [ -n "$hashes_url" ]; then
+		hashes_url=$(printf '%s' "$hashes_url" | sed -E 's/([?&])slot=[0-9]+&?/\1/; s/[?&]$//')
+		case "$hashes_url" in
+			*\?*) hashes_url="$hashes_url&slot=$call_slot" ;;
+			*)    hashes_url="$hashes_url?slot=$call_slot" ;;
+		esac
+	fi
 	config_get listen      settings listen '127.0.0.1:9000'
 	config_get workers     settings workers 9
 	config_get mtu         settings mtu 1280

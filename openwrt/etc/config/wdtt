@@ -14,9 +14,14 @@ config wdtt 'settings'
 	option device_id ''
 
 	# Where to pull fresh VK call links (wdtt-linkd endpoint on the server).
-	# Set at install time. Format (add &slot=N to keep routers non-overlapping):
-	#   http://YOUR_SERVER:56090/YOUR_TOKEN/links?n=4&slot=0
+	# Set at install time. Format:
+	#   http://YOUR_SERVER:56090/YOUR_TOKEN/links?n=4
 	option hashes_url ''
+
+	# VK-call slot: which non-overlapping subset of calls this router draws.
+	# Set a DIFFERENT slot per router (0, 1, 2 …) so they never share calls.
+	# Overrides any slot in hashes_url; empty = use the URL as-is / random.
+	option call_slot '0'
 	# Alternatively read tokens from a local file (leave hashes_url empty):
 	# option hashes_file '/etc/wdtt/vk-calls.txt'
 

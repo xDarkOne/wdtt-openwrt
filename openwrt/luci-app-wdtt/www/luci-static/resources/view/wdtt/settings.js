@@ -29,7 +29,12 @@ return view.extend({
 		o.password = true;
 
 		o = s.option(form.Value, 'hashes_url', _('URL ссылок на звонки (linkd)'));
-		o.placeholder = 'http://your-server:56090/<token>/links?n=4&slot=0';
+		o.placeholder = 'http://your-server:56090/<token>/links?n=4';
+
+		o = s.option(form.Value, 'call_slot', _('Слот звонков'),
+			_('Какую непересекающуюся выборку звонков берёт этот роутер. Задай разные слоты на разных роутерах (0, 1, 2…), чтобы они не тянули одни и те же звонки. Пусто = как задано в URL (или случайная выборка).'));
+		o.datatype = 'range(0,15)';
+		o.placeholder = '0';
 
 		o = s.option(form.Value, 'max_hashes', _('Число ссылок'), _('Сколько звонков использовать одновременно (больше = выше скорость).'));
 		o.datatype = 'range(1,16)';

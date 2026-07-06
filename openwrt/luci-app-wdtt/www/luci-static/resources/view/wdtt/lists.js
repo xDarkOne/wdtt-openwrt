@@ -1,11 +1,7 @@
 'use strict';
 'require view';
 'require form';
-'require rpc';
 'require ui';
-'require uci';
-
-var callAction = rpc.declare({ object: 'wdtt', method: 'action', params: [ 'action' ] });
 
 // 1:1 from itdoginfo/podkop (DOMAIN_LIST_OPTIONS).
 var DOMAIN_LIST_OPTIONS = {
@@ -64,7 +60,9 @@ return view.extend({
 
 		m = new form.Map('wdtt', _('Списки обхода'),
 			_('Что гнать через VK-туннель. Всё остальное идёт напрямую через WAN. ' +
-			  'Списки: itdoginfo/allow-domains. После изменений нажми «Сохранить и обновить списки».'));
+			  'Списки: itdoginfo/allow-domains. После «Сохранить и применить» набор ' +
+			  'пересобирается автоматически (домены резолвятся, подсети сервисов ' +
+			  'вроде Telegram берутся напрямую).'));
 
 		s = m.section(form.NamedSection, 'settings', 'wdtt');
 		s.anonymous = true;
@@ -111,30 +109,9 @@ return view.extend({
 		o = s.option(form.DynamicList, 'fully_routed_ip', _('Полностью в туннель (по устройству)'),
 			_('Локальные IP/подсети, весь трафик которых всегда идёт через туннель (напр. 192.168.1.50).'));
 
-		return m.render().then(function (node) {
-			var btn = E('button', {
-				'class': 'btn cbi-button cbi-button-apply',
-				'click': ui.createHandlerFn(this, function (ev) {
-					var b = ev.target; b.disabled = true;
-					return m.save()
-						.then(function () { return uci.apply(); })
-						.then(function () { return callAction('reload_lists'); })
-						.then(function (res) {
-							if (res && res.ok)
-								ui.addNotification(null, E('p', _('Списки пересобраны: домены отрезолвлены в nft-сеты, файрвол перезагружен.')), 'info');
-							else
-								ui.addNotification(null, E('p', (res && res.error) || _('Не удалось обновить списки.')), 'warning');
-						})
-						.catch(function (e) { ui.addNotification(null, E('p', _('Ошибка: ') + e), 'error'); })
-						.finally(function () { b.disabled = false; });
-				})
-			}, _('Сохранить и обновить списки'));
-			node.appendChild(E('div', { 'class': 'cbi-page-actions' }, [ btn ]));
-			return node;
-		});
-	},
-
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+		// Standard Save & Apply / Save / Reset. On apply, procd reloads the
+		// wdtt-client service (reload_service), which rebuilds the bypass lists
+		// (wdtt-genlists) — so saving here re-resolves the sets automatically.
+		return m.render();
+	}
 });
