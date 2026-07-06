@@ -62,8 +62,18 @@ rm -rf "$dir"
 sub4=$(cat "$WD/subnets4.list" 2>/dev/null)
 sub6=$(cat "$WD/subnets6.list" 2>/dev/null)
 
-DST4=$(printf '%s\n%s\n' "$sub4" "$V4RES" | grep -E '^[0-9]' | grep -vE '^(0\.0\.0\.0|127\.)' | sort -u | join_comma)
-DST6=$(printf '%s\n%s\n' "$sub6" "$V6RES" | grep ':' | grep -vi '^::1$' | sort -u | join_comma)
+# Drop bogus/local resolutions (a bypass target should be a public IP): RFC1918,
+# loopback, link-local and CGNAT 100.64/10 (Tailscale MagicDNS 100.100.100.100).
+PRIV='^(0\.|10\.|127\.|169\.254\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168\.|100\.6[4-9]\.|100\.[7-9][0-9]\.|100\.1[01][0-9]\.|100\.12[0-7]\.)'
+DST4=$(printf '%s\n%s\n' "$sub4" "$V4RES" | grep -E '^[0-9]' | grep -vE "$PRIV" | sort -u | join_comma)
+# wdtt_dst6 is only a leak-guard (nft drops v6 to bypass targets so clients fall
+# back to tunneled v4). The tunnel itself carries v4 only, so populate it ONLY
+# when block_ipv6=1 — otherwise leave v6 untouched (its normal path).
+if [ "$BLOCK_IPV6" = 1 ]; then
+	DST6=$(printf '%s\n%s\n' "$sub6" "$V6RES" | grep ':' | grep -vi '^::1$' | sort -u | join_comma)
+else
+	DST6=""
+fi
 FR=$(cat "$WD/fullroute.list" 2>/dev/null | grep -E '^[0-9]' | sort -u | join_comma)
 DOH4=$(cat "$WD/doh4.list" 2>/dev/null | grep -E '^[0-9]' | sort -u | join_comma)
 DOH6=$(cat "$WD/doh6.list" 2>/dev/null | grep ':' | sort -u | join_comma)
@@ -81,7 +91,23 @@ emit_set() {  # name family-type elements
 	emit_set wdtt_doh6 ipv6_addr "$DOH6"
 } > "$SETS_DST.tmp" && mv "$SETS_DST.tmp" "$SETS_DST"
 
-fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+# Apply to the LIVE ruleset now. fw4 reload is *additive* for named sets (it adds
+# the file's elements but never removes stale ones, so they accumulate), so sync
+# each set atomically with an explicit flush+add via a single `nft -f`. The
+# declarative file above is what fw4 loads on boot / full reload.
+apply_live() {
+	printf 'flush set inet fw4 %s\n' "$NFSET"
+	[ -n "$DST4" ] && printf 'add element inet fw4 %s { %s }\n' "$NFSET" "$DST4"
+	printf 'flush set inet fw4 %s\n' "$NFSET6"
+	[ -n "$DST6" ] && printf 'add element inet fw4 %s { %s }\n' "$NFSET6" "$DST6"
+	printf 'flush set inet fw4 %s\n' "$NFSRC"
+	[ -n "$FR" ] && printf 'add element inet fw4 %s { %s }\n' "$NFSRC" "$FR"
+	printf 'flush set inet fw4 wdtt_doh4\n'
+	[ -n "$DOH4" ] && printf 'add element inet fw4 wdtt_doh4 { %s }\n' "$DOH4"
+	printf 'flush set inet fw4 wdtt_doh6\n'
+	[ -n "$DOH6" ] && printf 'add element inet fw4 wdtt_doh6 { %s }\n' "$DOH6"
+}
+apply_live | nft -f - 2>/dev/null || fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
 
 n4=$(printf '%s' "$DST4" | tr ',' '\n' | grep -c . 2>/dev/null || echo 0)
 logger -t wdtt-resolve "dst4=$n4 elements (domains resolved: $i)"

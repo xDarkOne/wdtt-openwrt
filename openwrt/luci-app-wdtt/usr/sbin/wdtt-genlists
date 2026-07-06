@@ -92,6 +92,30 @@ list_path() {
 	esac
 }
 
+# Service ids that ship CIDR subnet lists at itdog (Subnets/IPv4|IPv6/<id>.lst).
+# These MUST be routed by IP, not by resolving domains — e.g. Telegram connects
+# to its data centres by fixed ranges (MTProto), never resolving telegram.org,
+# so domain-only routing silently misses it.
+has_subnets() {
+	case "$1" in
+		telegram|meta|discord|twitter|cloudflare|cloudfront|digitalocean|hetzner|ovh|roblox) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Expand the selected community ids into the ids whose subnets we pull. Podkop's
+# russia_inside "contains" the ALLOWED_WITH_RUSSIA_INSIDE services, so pull their
+# subnets too (else Telegram/Meta break under russia_inside as well).
+subnet_fetch_ids() {
+	local id
+	for id in $(uci -q get wdtt.settings.community_list); do
+		has_subnets "$id" && echo "$id"
+		if [ "$id" = "russia_inside" ]; then
+			echo "telegram meta discord twitter cloudflare cloudfront digitalocean hetzner ovh roblox" | tr ' ' '\n'
+		fi
+	done | sort -u
+}
+
 mkdir -p "$WD" /etc/nftables.d
 tmp=$(mktemp)
 
@@ -112,8 +136,18 @@ tmp=$(mktemp)
 	done
 } | sort -u > "$WD/domains.list"
 
-# ---------------- subnets (split by family) ----------------
-collect_subnets() {
+# ---------------- subnets (community CIDR lists + custom/local/remote) ----------------
+sub4=$(mktemp); sub6=$(mktemp); mix=$(mktemp)
+
+# Community CIDR lists — this is what makes Telegram/Meta/Discord/… actually
+# route (their real traffic goes to IP ranges, not resolvable domains).
+for id in $(subnet_fetch_ids); do
+	fetch "$AD_BASE/Subnets/IPv4/$id.lst" "$tmp" && tokens < "$tmp" >> "$sub4"
+	fetch "$AD_BASE/Subnets/IPv6/$id.lst" "$tmp" && tokens < "$tmp" >> "$sub6"
+done
+
+# Custom / local / remote subnets (mixed families -> split below).
+{
 	uci -q get wdtt.settings.custom_subnets | clean_free
 	for f in $(uci -q get wdtt.settings.local_subnet_list); do
 		[ -f "$f" ] && tokens < "$f"
@@ -121,10 +155,13 @@ collect_subnets() {
 	for u in $(uci -q get wdtt.settings.remote_subnet_list); do
 		fetch "$u" "$tmp" && tokens < "$tmp"
 	done
-}
-SUBS=$(collect_subnets)
-printf '%s\n' "$SUBS" | grep -E '^[0-9]+\.' | sort -u > "$WD/subnets4.list"
-printf '%s\n' "$SUBS" | grep ':'            | sort -u > "$WD/subnets6.list"
+} > "$mix"
+grep -E '^[0-9]+\.' "$mix" >> "$sub4"
+grep ':'            "$mix" >> "$sub6"
+
+grep -E '^[0-9]+\.'      "$sub4" | sort -u > "$WD/subnets4.list"
+grep -E '^[0-9a-fA-F]*:' "$sub6" | sort -u > "$WD/subnets6.list"
+rm -f "$sub4" "$sub6" "$mix"
 
 # ---------------- fully-routed source IPs ----------------
 uci -q get wdtt.settings.fully_routed_ip | tr ' ' '\n' | grep -E '^[0-9]' | sort -u > "$WD/fullroute.list"
