@@ -1,32 +1,51 @@
 #!/bin/sh
-# wdtt-genlists — assemble the bypass sets from every configured source.
+# wdtt-genlists — assemble the bypass sources into plain list files, then hand
+# them to wdtt-resolve which builds the live nft sets. This needs NO dnsmasq-full
+# (domains are resolved by wdtt-resolve, big services covered by CIDR subnets).
 #
-#   domains  -> /etc/dnsmasq.d/wdtt-domains.conf  (dnsmasq fills nft sets on resolve)
-#   subnets  -> nft set wdtt_dst4                  (static destination IPs/CIDRs)
-#   full IPs -> nft set wdtt_src4                  (source IPs fully tunneled)
-#   DoH IPs  -> nft sets wdtt_doh4/6               (blocked so LAN uses router DNS)
+#   domains  -> /etc/wdtt/domains.list     (wdtt-resolve turns these into IPs)
+#   subnets  -> /etc/wdtt/subnets4/6.list  (static destination IPs/CIDRs)
+#   full IPs -> /etc/wdtt/fullroute.list   (source IPs fully tunneled)
+#   DoH IPs  -> /etc/wdtt/doh4/6.list      (blocked so LAN uses router DNS)
 #
-# block_ipv6=1 also emits AAAA into wdtt_dst6 (nft drops v6 -> clients use v4).
-# Static elements live in an /etc/nftables.d include so they survive fw4 reloads.
-# Returns 2 if dnsmasq lacks nftset support (nothing is changed then).
+# Run wdtt-genlists when the *sources* change (config edit, daily cron);
+# wdtt-resolve re-runs more often to refresh the resolved IPs.
 
-NFSET=wdtt_dst4
-NFSET6=wdtt_dst6
-NFSRC=wdtt_src4
-DNSMASQ_DST=/etc/dnsmasq.d/wdtt-domains.conf
-SETS_DST=/etc/nftables.d/05-wdtt-sets.nft
+WD=/etc/wdtt
 AD_BASE="https://raw.githubusercontent.com/itdoginfo/allow-domains/main"
 DOH_BASE="https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master"
 WGIFACE=wgturn
 
-BLOCK_IPV6=$(uci -q get wdtt.settings.block_ipv6 2>/dev/null || echo 0)
 BLOCK_DOH=$(uci -q get wdtt.settings.block_doh 2>/dev/null || echo 0)
 
-DOH4_FALLBACK="1.1.1.1,1.0.0.1,1.1.1.2,1.0.0.2,1.1.1.3,1.0.0.3,8.8.8.8,8.8.4.4,9.9.9.9,9.9.9.10,9.9.9.11,149.112.112.112,149.112.112.10,149.112.112.11,94.140.14.14,94.140.15.15,208.67.222.222,208.67.220.220,45.90.28.0/24,45.90.30.0/24"
-DOH6_FALLBACK="2606:4700:4700::1111,2606:4700:4700::1001,2001:4860:4860::8888,2001:4860:4860::8844,2620:fe::fe,2620:fe::9,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff"
-
-# join stdin lines with commas (busybox has no `paste`)
-join_comma() { tr '\n' ',' | sed 's/,$//'; }
+DOH4_FALLBACK="1.1.1.1
+1.0.0.1
+1.1.1.2
+1.0.0.2
+1.1.1.3
+1.0.0.3
+8.8.8.8
+8.8.4.4
+9.9.9.9
+9.9.9.10
+9.9.9.11
+149.112.112.112
+149.112.112.10
+149.112.112.11
+94.140.14.14
+94.140.15.15
+208.67.222.222
+208.67.220.220
+45.90.28.0/24
+45.90.30.0/24"
+DOH6_FALLBACK="2606:4700:4700::1111
+2606:4700:4700::1001
+2001:4860:4860::8888
+2001:4860:4860::8844
+2620:fe::fe
+2620:fe::9
+2a10:50c0::ad1:ff
+2a10:50c0::ad2:ff"
 
 _dl() {
 	uclient-fetch -qO "$2" "$1" 2>/dev/null || curl -fsSL "$1" -o "$2" 2>/dev/null || wget -qO "$2" "$1" 2>/dev/null
@@ -55,14 +74,8 @@ fetch() {
 	[ "$rc" = 0 ] && [ -s "$2" ]
 }
 
-# domain tokens on stdin -> dnsmasq nftset lines (v4 always, v6 if enabled)
-emit() {
-	awk -v S4="$NFSET" -v S6="$NFSET6" -v V6="$BLOCK_IPV6" '
-		NF && $1 !~ /^(#|\/\/)/ {
-			printf "nftset=/%s/4#inet#fw4#%s\n", $1, S4
-			if (V6 == "1") printf "nftset=/%s/6#inet#fw4#%s\n", $1, S6
-		}'
-}
+# extract bare domain/first-token per line, skipping comments
+tokens() { awk 'NF && $1 !~ /^(#|\/\/)/ {print $1}'; }
 
 # free-form (commas/spaces/newlines, // comments) on stdin -> one token per line
 clean_free() {
@@ -79,74 +92,61 @@ list_path() {
 	esac
 }
 
-dnsmasq --version 2>/dev/null | grep -q 'no-nftset' && { echo "no-nftset" >&2; exit 2; }
-
-mkdir -p /etc/dnsmasq.d /etc/nftables.d
+mkdir -p "$WD" /etc/nftables.d
 tmp=$(mktemp)
 
-# ---------------- domains -> dnsmasq nftset ----------------
+# ---------------- domains -> $WD/domains.list ----------------
 {
 	for id in $(uci -q get wdtt.settings.community_list); do
-		fetch "$AD_BASE/$(list_path "$id")" "$tmp" && emit < "$tmp"
+		fetch "$AD_BASE/$(list_path "$id")" "$tmp" && tokens < "$tmp"
 	done
 	if [ "$(uci -q get wdtt.settings.use_zapret || echo 0)" = 1 ] && [ -f /opt/zapret/ipset/zapret-hosts-user.txt ]; then
-		emit < /opt/zapret/ipset/zapret-hosts-user.txt
+		tokens < /opt/zapret/ipset/zapret-hosts-user.txt
 	fi
-	uci -q get wdtt.settings.custom_domains | clean_free | emit
+	uci -q get wdtt.settings.custom_domains | clean_free
 	for f in $(uci -q get wdtt.settings.local_domain_list); do
-		[ -f "$f" ] && emit < "$f"
+		[ -f "$f" ] && tokens < "$f"
 	done
 	for u in $(uci -q get wdtt.settings.remote_domain_list); do
-		fetch "$u" "$tmp" && emit < "$tmp"
+		fetch "$u" "$tmp" && tokens < "$tmp"
 	done
-} > "$DNSMASQ_DST"
+} | sort -u > "$WD/domains.list"
 
-# ---------------- subnets / fully-routed / DoH -> nft elements ----------------
+# ---------------- subnets (split by family) ----------------
 collect_subnets() {
 	uci -q get wdtt.settings.custom_subnets | clean_free
 	for f in $(uci -q get wdtt.settings.local_subnet_list); do
-		[ -f "$f" ] && awk 'NF && $1 !~ /^(#|\/\/)/ {print $1}' "$f"
+		[ -f "$f" ] && tokens < "$f"
 	done
 	for u in $(uci -q get wdtt.settings.remote_subnet_list); do
-		fetch "$u" "$tmp" && awk 'NF && $1 !~ /^(#|\/\/)/ {print $1}' "$tmp"
+		fetch "$u" "$tmp" && tokens < "$tmp"
 	done
 }
+SUBS=$(collect_subnets)
+printf '%s\n' "$SUBS" | grep -E '^[0-9]+\.' | sort -u > "$WD/subnets4.list"
+printf '%s\n' "$SUBS" | grep ':'            | sort -u > "$WD/subnets6.list"
 
-SUBS=$(collect_subnets | grep -E '^[0-9]' | sort -u | join_comma)
-FR=$(uci -q get wdtt.settings.fully_routed_ip | tr ' ' '\n' | grep -E '^[0-9]' | sort -u | join_comma)
-DOH4=""; DOH6=""
+# ---------------- fully-routed source IPs ----------------
+uci -q get wdtt.settings.fully_routed_ip | tr ' ' '\n' | grep -E '^[0-9]' | sort -u > "$WD/fullroute.list"
+
+# ---------------- DoH server IPs ----------------
+: > "$WD/doh4.list"; : > "$WD/doh6.list"
 if [ "$BLOCK_DOH" = 1 ]; then
-	# dibdot format is "<ip>   # comment" — take the first field with awk
-	# (busybox `grep -o` is unreliable, so avoid it).
-	DOH4="$DOH4_FALLBACK"
+	printf '%s\n' "$DOH4_FALLBACK" > "$WD/doh4.list"
 	if fetch "$DOH_BASE/doh-ipv4.txt" "$tmp"; then
-		d=$(awk 'NF && $1 ~ /^[0-9]+\.[0-9]/ {print $1}' "$tmp" | sort -u | join_comma)
-		[ -n "$d" ] && DOH4="$d"
+		awk 'NF && $1 ~ /^[0-9]+\.[0-9]/ {print $1}' "$tmp" | sort -u > "$WD/doh4.list"
 	fi
-	DOH6="$DOH6_FALLBACK"
+	printf '%s\n' "$DOH6_FALLBACK" > "$WD/doh6.list"
 	if fetch "$DOH_BASE/doh-ipv6.txt" "$tmp"; then
-		d=$(awk 'NF && $1 ~ /:/ {print $1}' "$tmp" | sort -u | join_comma)
-		[ -n "$d" ] && DOH6="$d"
+		awk 'NF && $1 ~ /:/ {print $1}' "$tmp" | sort -u > "$WD/doh6.list"
 	fi
 fi
 
-# Inline-element set definitions (survive fw4 reloads). dst4/dst6 are also
-# filled by dnsmasq at runtime as bypass domains resolve.
-emit_set() {  # name family-type elements
-	printf 'set %s { type %s; flags interval; auto-merge;' "$1" "$2"
-	[ -n "$3" ] && printf ' elements = { %s };' "$3"
-	printf ' }\n'
-}
-{
-	emit_set "$NFSET"    ipv4_addr "$SUBS"
-	emit_set "$NFSET6"   ipv6_addr ""
-	emit_set "$NFSRC"    ipv4_addr "$FR"
-	emit_set wdtt_doh4   ipv4_addr "$DOH4"
-	emit_set wdtt_doh6   ipv6_addr "$DOH6"
-} > "$SETS_DST"
-rm -f /etc/nftables.d/11-wdtt-elements.nft 2>/dev/null
-
 rm -f "$tmp"
-/etc/init.d/dnsmasq restart >/dev/null 2>&1
-fw4 reload >/dev/null 2>&1
+
+# Legacy cleanup: drop the old dnsmasq nftset config if a previous version left it.
+rm -f /etc/dnsmasq.d/wdtt-domains.conf /etc/nftables.d/11-wdtt-elements.nft 2>/dev/null
+
+# Build the live nft sets from the lists (resolves domains, no dnsmasq needed).
+[ -x /usr/sbin/wdtt-resolve ] && /usr/sbin/wdtt-resolve
 exit 0

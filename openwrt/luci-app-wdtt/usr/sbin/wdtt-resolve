@@ -1,0 +1,88 @@
+#!/bin/sh
+# wdtt-resolve — turn the assembled bypass lists into the live nft sets WITHOUT
+# needing dnsmasq-full. It resolves the domain list to IPs and merges them with
+# the static subnet/DoH/fully-routed lists into the declarative set include
+# (05-wdtt-sets.nft, which survives fw4 reloads).
+#
+# Big services (Telegram, Meta, Cloudflare, …) are best covered by CIDR subnet
+# lists — no resolution needed; only bare domains get resolved here.
+#
+# Inputs (written by wdtt-genlists):
+#   /etc/wdtt/domains.list    bare domains to resolve
+#   /etc/wdtt/subnets4.list   static IPv4 CIDRs/IPs         -> wdtt_dst4
+#   /etc/wdtt/subnets6.list   static IPv6 CIDRs/IPs         -> wdtt_dst6
+#   /etc/wdtt/fullroute.list  source IPs fully tunneled     -> wdtt_src4
+#   /etc/wdtt/doh4.list /doh6.list  DoH server IPs          -> wdtt_doh4/6
+set -u
+
+WD=/etc/wdtt
+SETS_DST=/etc/nftables.d/05-wdtt-sets.nft
+NFSET=wdtt_dst4; NFSET6=wdtt_dst6; NFSRC=wdtt_src4
+PAR=24
+LOCKDIR=/tmp/wdtt-resolve.lock.d
+
+BLOCK_IPV6=$(uci -q get wdtt.settings.block_ipv6 2>/dev/null || echo 0)
+
+# Single-flight: skip if another run holds the lock (steal if it's stale >20m).
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+	if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +20 2>/dev/null)" ]; then
+		rm -rf "$LOCKDIR"; mkdir "$LOCKDIR" 2>/dev/null || exit 0
+	else
+		exit 0
+	fi
+fi
+trap 'rm -rf "$LOCKDIR"' EXIT INT TERM
+
+join_comma() { tr '\n' ',' | sed 's/,$//'; }
+
+# nslookup's first Address is the resolver itself -> drop it with tail -n +2.
+resolve4() { nslookup "$1" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | tail -n +2; }
+resolve6() { nslookup "$1" 2>/dev/null | grep -oiE '([0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}'; }
+
+DOMAINS="$WD/domains.list"
+dir=$(mktemp -d)
+i=0
+if [ -f "$DOMAINS" ]; then
+	while IFS= read -r d; do
+		[ -n "$d" ] || continue
+		case "$d" in \#*|//*) continue ;; esac
+		i=$((i + 1))
+		(
+			resolve4 "$d" > "$dir/$i.4" 2>/dev/null
+			[ "$BLOCK_IPV6" = 1 ] && resolve6 "$d" > "$dir/$i.6" 2>/dev/null
+		) &
+		[ $((i % PAR)) -eq 0 ] && wait
+	done < "$DOMAINS"
+	wait
+fi
+V4RES=$(cat "$dir"/*.4 2>/dev/null)
+V6RES=$(cat "$dir"/*.6 2>/dev/null)
+rm -rf "$dir"
+
+sub4=$(cat "$WD/subnets4.list" 2>/dev/null)
+sub6=$(cat "$WD/subnets6.list" 2>/dev/null)
+
+DST4=$(printf '%s\n%s\n' "$sub4" "$V4RES" | grep -E '^[0-9]' | grep -vE '^(0\.0\.0\.0|127\.)' | sort -u | join_comma)
+DST6=$(printf '%s\n%s\n' "$sub6" "$V6RES" | grep ':' | grep -vi '^::1$' | sort -u | join_comma)
+FR=$(cat "$WD/fullroute.list" 2>/dev/null | grep -E '^[0-9]' | sort -u | join_comma)
+DOH4=$(cat "$WD/doh4.list" 2>/dev/null | grep -E '^[0-9]' | sort -u | join_comma)
+DOH6=$(cat "$WD/doh6.list" 2>/dev/null | grep ':' | sort -u | join_comma)
+
+emit_set() {  # name family-type elements
+	printf 'set %s { type %s; flags interval; auto-merge;' "$1" "$2"
+	[ -n "$3" ] && printf ' elements = { %s };' "$3"
+	printf ' }\n'
+}
+{
+	emit_set "$NFSET"  ipv4_addr "$DST4"
+	emit_set "$NFSET6" ipv6_addr "$DST6"
+	emit_set "$NFSRC"  ipv4_addr "$FR"
+	emit_set wdtt_doh4 ipv4_addr "$DOH4"
+	emit_set wdtt_doh6 ipv6_addr "$DOH6"
+} > "$SETS_DST.tmp" && mv "$SETS_DST.tmp" "$SETS_DST"
+
+fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+
+n4=$(printf '%s' "$DST4" | tr ',' '\n' | grep -c . 2>/dev/null || echo 0)
+logger -t wdtt-resolve "dst4=$n4 elements (domains resolved: $i)"
+exit 0

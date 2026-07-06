@@ -34,7 +34,6 @@ BIN_DST=/usr/sbin/wdtt-client
 INIT_DST=/etc/init.d/wdtt-client
 CFG_DST=/etc/config/wdtt
 NFT_DST=/etc/nftables.d/10-wdtt.nft
-DNSMASQ_DST=/etc/dnsmasq.d/wdtt-domains.conf
 NFSET=wdtt_dst4
 DOMAINS_URL="${WDTT_DOMAINS_URL:-https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-dnsmasq-nfset.lst}"
 
@@ -113,36 +112,21 @@ ensure_deps() {
 	echo "-> wg + ip готовы"
 }
 
-# dnsmasq must support nftset for domain-based selective routing.
-ensure_dnsmasq_nftset() {
-	say "[2/7] Проверка dnsmasq nftset..."
-	if dnsmasq --version 2>/dev/null | grep -q 'no-nftset'; then
-		warn "текущий dnsmasq без nftset — ставлю dnsmasq-full"
-		# CRITICAL: the package manager removes dnsmasq to install dnsmasq-full;
-		# that kills DNS mid-transaction and apk can no longer resolve its repo,
-		# stranding the router with NO dnsmasq. Pin an independent resolver FIRST
-		# so the download survives dnsmasq going away. (netifd/tailscale will
-		# regenerate resolv.conf once dnsmasq is back.)
-		cp /etc/resolv.conf /tmp/wdtt-resolv.bak 2>/dev/null || true
-		printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
-		if command -v apk >/dev/null 2>&1; then
-			apk update >/dev/null 2>&1 || true
-			apk add dnsmasq-full || apk add --force-overwrite dnsmasq-full || {
-				err "dnsmasq-full недоступен. Восстанавливаю dnsmasq..."
-				apk add dnsmasq || apk add --force-overwrite dnsmasq || true
-				return 1
-			}
-		else
-			opkg update >/dev/null 2>&1 || true
-			opkg install dnsmasq-full --force-overwrite || { err "не удалось поставить dnsmasq-full"; opkg install dnsmasq; return 1; }
-		fi
-		/etc/init.d/dnsmasq enable 2>/dev/null || true
-		/etc/init.d/dnsmasq restart 2>/dev/null || true
-		sleep 2
+# Selective routing no longer needs dnsmasq-full: wdtt-resolve fills the nft
+# sets by resolving the domain lists itself. So we NEVER swap dnsmasq (that swap
+# is the one step that can strand a remote router). We just check a resolver is
+# reachable so wdtt-resolve will work.
+check_resolver() {
+	say "[2/7] Проверка резолвера (dnsmasq НЕ трогаем)..."
+	if ! command -v nslookup >/dev/null 2>&1; then
+		warn "nslookup недоступен — wdtt-resolve не сможет резолвить домены (поставь busybox nslookup или используй списки подсетей)"
+		return 0
 	fi
-	dnsmasq --version 2>/dev/null | grep -q 'no-nftset' && { err "nftset всё ещё не поддерживается"; return 1; }
-	command -v nslookup >/dev/null 2>&1 && ! nslookup openwrt.org >/dev/null 2>&1 && { err "DNS не резолвит после установки dnsmasq"; return 1; }
-	echo "-> dnsmasq c nftset готов, DNS ок"
+	if nslookup openwrt.org >/dev/null 2>&1; then
+		echo "-> DNS резолвит, wdtt-resolve будет наполнять сеты"
+	else
+		warn "DNS сейчас не резолвит — сеты наполнятся, когда резолвер заработает (или через списки подсетей)"
+	fi
 }
 
 install_files() {
@@ -190,9 +174,9 @@ install_config() {
 
 setup_nft_and_domains() {
 	say "[5/7] nftables-сеты + разметка + генерация списков..."
-	# fw4 include: dst set (filled by dnsmasq + static subnets), src set (fully
-	# routed devices). Prerouting rule marks matching source or destination.
-	# Sets live in 05-wdtt-sets.nft (genlists rewrites it with inline elements,
+	# fw4 include: dst set (filled by wdtt-resolve from domains + static subnets),
+	# src set (fully routed devices). Prerouting rule marks matching src/dst.
+	# Sets live in 05-wdtt-sets.nft (wdtt-resolve rewrites it with inline elements,
 	# which — unlike runtime `add element` — survive fw4 reloads). Chains that
 	# reference them go in 10-wdtt.nft (05 sorts first, so sets load first).
 	cat > /etc/nftables.d/05-wdtt-sets.nft <<EOF
@@ -215,7 +199,7 @@ chain wdtt_mark {
 chain wdtt_filter {
 	type filter hook forward priority -150; policy accept;
 	# All rules are gated by set population (empty set = no-op), so config
-	# toggles just control whether wdtt-genlists fills the sets.
+	# toggles just control whether wdtt-resolve fills the sets.
 	# DoH/DoT: force LAN clients onto the router's resolver.
 	ip daddr @wdtt_doh4 tcp dport { 443, 853 } reject with tcp reset
 	ip daddr @wdtt_doh4 udp dport { 443, 853 } drop
@@ -226,24 +210,16 @@ chain wdtt_filter {
 }
 EOF
 
-	# Point dnsmasq at /etc/dnsmasq.d so it reads the generated nftset file.
-	mkdir -p /etc/dnsmasq.d
-	cur=$(uci -q get dhcp.@dnsmasq[0].confdir || echo "")
-	case "$cur" in
-		*"/etc/dnsmasq.d"*) : ;;
-		"") uci set dhcp.@dnsmasq[0].confdir='/etc/dnsmasq.d'; uci commit dhcp ;;
-		*)  uci set dhcp.@dnsmasq[0].confdir="$cur,/etc/dnsmasq.d"; uci commit dhcp ;;
-	esac
 	fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
 
-	# Build all lists from UCI (community services, zapret, custom, remote…).
+	# Assemble the source lists, then resolve them into the nft sets (no dnsmasq).
 	if [ -x /usr/sbin/wdtt-genlists ]; then
-		/usr/sbin/wdtt-genlists || warn "генерация списков вернула ошибку (dnsmasq-full?)"
+		/usr/sbin/wdtt-genlists || warn "генерация списков вернула ошибку"
 	else
 		warn "wdtt-genlists не найден — списки соберутся при первом «Обновить списки» в UI"
 	fi
-	n=$(grep -c '^nftset=' "$DNSMASQ_DST" 2>/dev/null || echo 0)
-	echo "-> сеты готовы, доменов в списке: $n"
+	n=$(nft list set inet fw4 "$NFSET" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | wc -l)
+	echo "-> сеты готовы, IP в wdtt_dst4: $n"
 }
 
 setup_firewall() {
@@ -277,7 +253,7 @@ install_luci() {
 	cp -a "$src/usr" / 2>/dev/null
 	cp -a "$src/www" / 2>/dev/null
 	cp -a "$src/etc" / 2>/dev/null
-	chmod +x /usr/libexec/rpcd/wdtt /usr/sbin/wdtt-genlists 2>/dev/null
+	chmod +x /usr/libexec/rpcd/wdtt /usr/sbin/wdtt-genlists /usr/sbin/wdtt-resolve 2>/dev/null
 	rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null
 	/etc/init.d/rpcd reload 2>/dev/null
 	echo "-> интерфейс: LuCI → Службы → WDTT"
@@ -310,7 +286,7 @@ main() {
 	[ -n "$WDTT_SLOT" ] && echo " slot=$WDTT_SLOT (непересекающиеся звонки)"
 	echo "========================================================================="
 	ensure_deps
-	ensure_dnsmasq_nftset || warn "домённая маршрутизация недоступна; туннель поднимется, но пометка трафика работать не будет"
+	check_resolver
 	install_files
 	install_config
 	install_luci

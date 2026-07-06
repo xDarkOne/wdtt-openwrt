@@ -119,7 +119,7 @@ return view.extend({
 						.then(function () { return callAction('reload_lists'); })
 						.then(function (res) {
 							if (res && res.ok)
-								ui.addNotification(null, E('p', _('Списки пересобраны, dnsmasq и файрвол перезагружены.')), 'info');
+								ui.addNotification(null, E('p', _('Списки пересобраны: домены отрезолвлены в nft-сеты, файрвол перезагружен.')), 'info');
 							else
 								ui.addNotification(null, E('p', (res && res.error) || _('Не удалось обновить списки.')), 'warning');
 						})

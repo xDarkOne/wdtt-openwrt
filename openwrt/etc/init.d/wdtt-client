@@ -8,24 +8,30 @@ STOP=10
 PROG=/usr/sbin/wdtt-client
 CRON_FILE=/etc/crontabs/root
 
-# Keep the auto-update cron entry in sync with the config.
+# Keep the cron entries in sync with the config:
+#   - wdtt-genlists : daily re-fetch of the source lists (auto_update)
+#   - wdtt-resolve  : refresh resolved IPs every resolve_minutes (fills nft sets)
 sync_cron() {
-	local au hour
+	local au hour rmin
 	config_get_bool au settings auto_update 0
 	config_get hour settings auto_update_hour 5
-	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-genlists#d' "$CRON_FILE"
+	config_get rmin settings resolve_minutes 30
+	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-\(genlists\|resolve\)#d' "$CRON_FILE"
+	mkdir -p /etc/crontabs
+	# Resolver runs regardless (it's what keeps the sets populated). Clamp 1..59.
+	[ "$rmin" -ge 1 ] 2>/dev/null && [ "$rmin" -le 59 ] 2>/dev/null || rmin=30
+	echo "*/$rmin * * * * /usr/sbin/wdtt-resolve >/dev/null 2>&1 # wdtt" >> "$CRON_FILE"
 	if [ "$au" = "1" ]; then
-		mkdir -p /etc/crontabs
 		echo "0 $hour * * * /usr/sbin/wdtt-genlists >/dev/null 2>&1 # wdtt" >> "$CRON_FILE"
-		/etc/init.d/cron enable 2>/dev/null
-		# crond watches /etc/crontabs via inotify; only start it if it's down
-		# (avoid restart churn that can leave procd/crond out of sync).
-		pgrep crond >/dev/null 2>&1 || /etc/init.d/cron start 2>/dev/null
 	fi
+	/etc/init.d/cron enable 2>/dev/null
+	# crond watches /etc/crontabs via inotify; only start it if it's down
+	# (avoid restart churn that can leave procd/crond out of sync).
+	pgrep crond >/dev/null 2>&1 || /etc/init.d/cron start 2>/dev/null
 }
 
 stop_service() {
-	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-genlists#d' "$CRON_FILE"
+	[ -f "$CRON_FILE" ] && sed -i '\#/usr/sbin/wdtt-\(genlists\|resolve\)#d' "$CRON_FILE"
 }
 
 start_service() {

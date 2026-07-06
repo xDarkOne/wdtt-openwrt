@@ -19,8 +19,9 @@ else is the OpenWrt glue.
 ## How it works
 
 ```
-LAN client ─▶ dnsmasq resolves a blocked domain ─▶ IP added to nft set wdtt_dst4
-LAN client ─▶ packet to that IP ─▶ nft marks it (0x1) ─▶ ip rule ─▶ table 100
+wdtt-resolve ─▶ resolves the blocked-domain list ─▶ IPs added to nft set wdtt_dst4
+                (+ static CIDR subnets for big services; no dnsmasq-full needed)
+LAN client ─▶ packet to such an IP ─▶ nft marks it (0x1) ─▶ ip rule ─▶ table 100
                                                                        │ default
                                                                        ▼
                           wgturn (kernel WireGuard, endpoint 127.0.0.1:9000)
@@ -43,12 +44,17 @@ never loops back into the tunnel.
   and applies the server-issued per-device WG config (`10.66.66.x`) to the
   kernel `wgturn` interface. It also owns the `ip rule fwmark → table` and the
   table's default route.
-* **nft set `wdtt_dst4` + dnsmasq** — dnsmasq (built with nftset support) adds
-  the resolved IPs of the blocked domains to the set; an `/etc/nftables.d`
-  rule marks packets headed there. Domain lists come from
+* **nft set `wdtt_dst4` + `wdtt-resolve`** — `wdtt-genlists` assembles the
+  bypass sources into plain list files; `wdtt-resolve` resolves the domains to
+  IPs and writes them (plus static CIDR subnets) into the set on a timer. An
+  `/etc/nftables.d` rule marks packets headed there. **No `dnsmasq-full` swap** —
+  the stock dnsmasq is left untouched (unlike podkop/NetShift, WDTT does its own
+  resolving instead of running a userspace proxy, keeping the kernel fast-path).
+  Domain lists come from
   [itdoginfo/allow-domains](https://github.com/itdoginfo/allow-domains) (the
   same community lists NetShift/podkop use), plus the router's own zapret
-  `zapret-hosts-user.txt`.
+  `zapret-hosts-user.txt`. Big services are best covered by CIDR subnet lists
+  (no resolving needed).
 * **`wdtt-linkd`** (on the VPS) — a tiny token-guarded endpoint that returns 4
   fresh VK call links on demand, read live from the whitelist-bypass creator's
   rotating file. The router refetches them periodically. With `?slot=N` it hands
@@ -100,8 +106,10 @@ openwrt/etc/config/wdtt      UCI config template
 openwrt/etc/init.d/wdtt-client  procd service
 bootstrap.sh             one-line entry: download repo tarball → run installer
 scripts/build.sh         cross-compile via docker golang (client + linkd)
-scripts/install.sh       router installer (deps, nft, dnsmasq, firewall, slot)
+scripts/install.sh       router installer (deps, nft, firewall, slot; no dnsmasq swap)
 deploy.env.example       template for your secrets (deploy.env is gitignored)
+luci-app-wdtt/usr/sbin/wdtt-genlists  assemble bypass sources → list files
+luci-app-wdtt/usr/sbin/wdtt-resolve   resolve domains + subnets → nft sets
 server/wdtt-linkd.service    systemd unit for the endpoint
 server/setup-linkd.sh        install the endpoint on the VPS
 ```
@@ -150,16 +158,18 @@ cp deploy.env.example deploy.env      # fill in server / token / password
 . ./deploy.env && sh scripts/install.sh --slot 0
 ```
 
-The installer installs `wireguard-tools`/`kmod-wireguard` (and `dnsmasq-full`
-if the stock dnsmasq lacks nftset), builds the nft set + marking rule, pulls the
-allow-domains list + your zapret hostlist into dnsmasq, sets up the firewall
-zone (masq + MSS clamp, `lan → wdtt`), generates a stable `device_id`, drops in
-the LuCI app, and starts the service. Re-running it upgrades in place (existing
-`/etc/config/wdtt` options are kept; only the ones you pass are updated).
+The installer installs `wireguard-tools`/`kmod-wireguard`, builds the nft set +
+marking rule, assembles the allow-domains list + your zapret hostlist and
+resolves them into the set, sets up the firewall zone (masq + MSS clamp,
+`lan → wdtt`), generates a stable `device_id`, drops in the LuCI app, adds the
+`wdtt-resolve` cron, and starts the service. Re-running it upgrades in place
+(existing `/etc/config/wdtt` options are kept; only the ones you pass are
+updated).
 
-> **Note (daily-driver routers):** if dnsmasq is the stock build (no `nftset`),
-> the installer swaps in `dnsmasq-full`, which briefly restarts DNS. Do it
-> during a quiet moment.
+> **Safe on remote routers:** the installer **never swaps dnsmasq**. Stock
+> dnsmasq is left as-is — `wdtt-resolve` resolves the domain lists itself, so
+> there's no DNS-restart step that could strand a router you can't reach. It
+> refreshes every `resolve_minutes` (default 30).
 
 ### Multiple routers — non-overlapping calls
 
@@ -195,14 +205,15 @@ Settings → *URL ссылок на звонки* or `uci set wdtt.settings.hash
 | `mtu`         | WG MTU (default `1280`)                                     |
 | `table` / `rule_pref` | policy-routing table / ip-rule preference           |
 | `refresh`     | token refetch / session recycle interval (`15m`)           |
-| `auto_update` / `auto_update_hour` | daily cron refresh of the lists          |
+| `auto_update` / `auto_update_hour` | daily cron refresh of the source lists   |
+| `resolve_minutes` | how often `wdtt-resolve` re-resolves domains into the set (default `30`, 1..59) |
 | `lists_via_tunnel` | fetch lists via the tunnel if GitHub is blocked (`auto`) |
 | `block_doh`   | block external DoH/DoT (dibdot list) so clients use router DNS |
 | `block_ipv6`  | drop IPv6 to bypass domains → clients fall back to tunneled IPv4 |
 
-Change the bypass list via `WDTT_DOMAINS_URL` at install time (any
-allow-domains `*-dnsmasq-nfset.lst`). Apply config changes with
-`/etc/init.d/wdtt-client restart`.
+Pick services in the LuCI *Lists* tab (or `community_list` in UCI). Apply config
+changes with `/etc/init.d/wdtt-client restart`; refresh the bypass IPs any time
+with `wdtt-genlists` (re-fetch sources) or `wdtt-resolve` (re-resolve only).
 
 ---
 

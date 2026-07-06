@@ -75,9 +75,13 @@ config wdtt 'settings'
 	# list community_list 'telegram'
 	# Fold in /opt/zapret/ipset/zapret-hosts-user.txt.
 	option use_zapret '1'
-	# Auto-refresh the lists from GitHub daily via cron (podkop-style).
+	# Auto-refresh the source lists from GitHub daily via cron (podkop-style).
 	option auto_update '1'
 	option auto_update_hour '5'
+	# Selective routing needs NO dnsmasq-full: wdtt-resolve resolves the domain
+	# lists into the nft set itself, every resolve_minutes (1..59). Big services
+	# are best covered by CIDR subnet lists (no resolution needed).
+	option resolve_minutes '30'
 	# If GitHub is blocked directly, pull lists through the tunnel:
 	#   auto = try direct, fall back to tunnel; always = tunnel only; never = direct only
 	option lists_via_tunnel 'auto'
